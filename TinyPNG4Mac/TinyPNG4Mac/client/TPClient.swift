@@ -205,6 +205,7 @@ class TPClient {
 
                     try targetUrl.ensureDirectoryExists()
                     try downloadedUrl.moveFileTo(targetUrl)
+                    task.outputUrl = targetUrl
                     if let filePermission = task.filePermission {
                         targetUrl.setPosixPermissions(filePermission)
                     }
@@ -278,7 +279,7 @@ class TPClient {
     private func completeTask(_ task: TaskInfo, fileSizeFromResponse: UInt64, outputType: ImageType?) {
         let finalFileSize: UInt64
         do {
-            finalFileSize = try task.outputUrl!.sizeOfFile()
+            finalFileSize = try task.outputUrl?.sizeOfFile() ?? fileSizeFromResponse
         } catch {
             finalFileSize = fileSizeFromResponse
         }

@@ -84,10 +84,16 @@ struct TinyPNG4MacApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private struct PendingOpenRequest {
+        let urls: [URL]
+        let saveMode: String?
+        let outputDirectoryUrl: URL?
+    }
+
     private var vm: MainViewModel?
     private var openMainWindow: (() -> Void)?
 
-    private var pendingOpenUrls: [URL] = []
+    private var pendingOpenRequests: [PendingOpenRequest] = []
     private var appDidFinishLaunching = false
 
     func configure(viewModel vm: MainViewModel, openMainWindow: @escaping () -> Void) {
@@ -101,18 +107,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc(compressSelection:userData:error:)
     func compressSelection(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
-            .urlReadingFileURLsOnly: true,
-        ]
-        let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL])?
-            .map(\.standardizedFileURL) ?? []
+        handleServiceRequest(
+            pasteboard,
+            saveMode: AppConfig.saveModeNameOverwrite,
+            requiresOutputDirectorySelection: false,
+            error: error
+        )
+    }
 
-        if urls.isEmpty {
-            error.pointee = "No valid files were provided to Tiny Image." as NSString
-            return
-        }
-
-        enqueueOpenUrls(urls, bringAppToFront: true)
+    @objc(compressSelectionSaveAs:userData:error:)
+    func compressSelectionSaveAs(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        handleServiceRequest(
+            pasteboard,
+            saveMode: AppConfig.saveModeNameSaveAs,
+            requiresOutputDirectorySelection: true,
+            error: error
+        )
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -153,29 +163,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tryHandleOpenUrls() {
-        guard appDidFinishLaunching, let vm, !pendingOpenUrls.isEmpty else {
+        guard appDidFinishLaunching, let vm, !pendingOpenRequests.isEmpty else {
             return
         }
 
-        let urls = pendingOpenUrls
-        pendingOpenUrls.removeAll()
+        let requests = pendingOpenRequests
+        pendingOpenRequests.removeAll()
 
-        let imageUrls = FileUtils.findImageFiles(urls: urls)
-        if !imageUrls.isEmpty {
-            vm.createTasks(imageURLs: imageUrls)
+        for request in requests {
+            let imageUrls = FileUtils.findImageFiles(urls: request.urls)
+            if !imageUrls.isEmpty {
+                vm.createTasks(
+                    imageURLs: imageUrls,
+                    saveMode: request.saveMode,
+                    outputDirectoryUrl: request.outputDirectoryUrl
+                )
+            }
         }
     }
 
-    private func enqueueOpenUrls(_ urls: [URL], bringAppToFront: Bool) {
+    private func enqueueOpenUrls(
+        _ urls: [URL],
+        saveMode: String? = nil,
+        outputDirectoryUrl: URL? = nil,
+        bringAppToFront: Bool
+    ) {
         guard !urls.isEmpty else {
             return
         }
 
+        var uniqueUrls: [URL] = []
         for url in urls {
-            if !pendingOpenUrls.contains(where: { $0.isSameFilePath(as: url) }) {
-                pendingOpenUrls.append(url)
+            if !uniqueUrls.contains(where: { $0.isSameFilePath(as: url) }) {
+                uniqueUrls.append(url.standardizedFileURL)
             }
         }
+
+        pendingOpenRequests.append(
+            PendingOpenRequest(
+                urls: uniqueUrls,
+                saveMode: saveMode,
+                outputDirectoryUrl: outputDirectoryUrl
+            )
+        )
 
         DispatchQueue.main.async {
             if bringAppToFront {
@@ -186,5 +216,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             self.tryHandleOpenUrls()
         }
+    }
+
+    private func handleServiceRequest(
+        _ pasteboard: NSPasteboard,
+        saveMode: String,
+        requiresOutputDirectorySelection: Bool,
+        error: AutoreleasingUnsafeMutablePointer<NSString?>
+    ) {
+        let urls = extractFileUrls(from: pasteboard)
+        if urls.isEmpty {
+            error.pointee = "No valid files were provided to Tiny Image." as NSString
+            return
+        }
+
+        let outputDirectoryUrl: URL?
+        if requiresOutputDirectorySelection {
+            guard let selectedDirectory = selectServiceOutputDirectory() else {
+                return
+            }
+            outputDirectoryUrl = selectedDirectory
+        } else {
+            outputDirectoryUrl = nil
+        }
+
+        enqueueOpenUrls(
+            urls,
+            saveMode: saveMode,
+            outputDirectoryUrl: outputDirectoryUrl,
+            bringAppToFront: true
+        )
+    }
+
+    private func extractFileUrls(from pasteboard: NSPasteboard) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+        ]
+        return (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL])?
+            .map(\.standardizedFileURL) ?? []
+    }
+
+    private func selectServiceOutputDirectory() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = AppContext.shared.appConfig.outputDirectoryUrl ??
+            FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.title = String(localized: "Select output directory")
+        panel.prompt = String(localized: "Select")
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard panel.runModal() == .OK else {
+            return nil
+        }
+
+        return panel.url?.standardizedFileURL
     }
 }
