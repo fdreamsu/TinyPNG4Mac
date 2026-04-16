@@ -16,11 +16,13 @@ struct TinyPNG4MacApp: App {
     @StateObject var appContext = AppContext.shared
     @StateObject var vm: MainViewModel = MainViewModel()
     @StateObject var debugVM: DebugViewModel = DebugViewModel.shared
-
-    @State var firstAppear: Bool = true
     @State var lastTaskCount = 0
 
     var body: some Scene {
+        let _ = appDelgate.configure(viewModel: vm) {
+            openWindow(id: "main")
+        }
+
         Window("Tiny Image", id: "main") {
             MainContentView(vm: vm)
                 .frame(
@@ -30,16 +32,6 @@ struct TinyPNG4MacApp: App {
                     minHeight: appContext.minSize.height,
                     idealHeight: appContext.minSize.height
                 )
-                .onAppear {
-                    if !firstAppear {
-                        return
-                    }
-                    firstAppear = false
-
-                    appDelgate.configure(viewModel: vm) {
-                        openWindow(id: "main")
-                    }
-                }
                 .environmentObject(appContext)
                 .environmentObject(debugVM)
         }
@@ -90,10 +82,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let outputDirectoryUrl: URL?
     }
 
+    private enum WindowActivation {
+        static let retryDelay: TimeInterval = 0.1
+        static let maxRetryCount = 20
+    }
+
     private var vm: MainViewModel?
     private var openMainWindow: (() -> Void)?
 
     private var pendingOpenRequests: [PendingOpenRequest] = []
+    private var pendingBringAppToFront = false
     private var appDidFinishLaunching = false
 
     func configure(viewModel vm: MainViewModel, openMainWindow: @escaping () -> Void) {
@@ -102,6 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.openMainWindow = openMainWindow
 
+        bringMainWindowToFrontIfNeeded()
         tryHandleOpenUrls()
     }
 
@@ -138,11 +137,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         appDidFinishLaunching = true
 
+        bringMainWindowToFrontIfNeeded()
         tryHandleOpenUrls()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         enqueueOpenUrls(urls, bringAppToFront: true)
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        bringMainWindowToFrontIfNeeded()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        requestBringMainWindowToFront()
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -209,9 +218,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.async {
             if bringAppToFront {
-                self.openMainWindow?()
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
+                self.requestBringMainWindowToFront()
             }
 
             self.tryHandleOpenUrls()
@@ -274,5 +281,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return panel.url?.standardizedFileURL
+    }
+
+    private func requestBringMainWindowToFront() {
+        pendingBringAppToFront = true
+        bringMainWindowToFrontIfNeeded()
+    }
+
+    private func bringMainWindowToFrontIfNeeded(retryCount: Int = WindowActivation.maxRetryCount) {
+        guard pendingBringAppToFront else {
+            return
+        }
+
+        openMainWindow?()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.unhide(nil)
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let window = preferredWindowForForegrounding() {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
+
+            if isWindowFrontmost(window) {
+                pendingBringAppToFront = false
+                return
+            }
+        }
+
+        guard retryCount > 0 else {
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + WindowActivation.retryDelay) { [weak self] in
+            self?.bringMainWindowToFrontIfNeeded(retryCount: retryCount - 1)
+        }
+    }
+
+    private func preferredWindowForForegrounding() -> NSWindow? {
+        NSApp.windows.first(where: { $0.title == "Tiny Image" && !$0.isMiniaturized }) ??
+            NSApp.windows.first(where: { $0.isVisible && !$0.isMiniaturized }) ??
+            NSApp.windows.first(where: { !$0.isMiniaturized }) ??
+            NSApp.windows.first
+    }
+
+    private func isWindowFrontmost(_ window: NSWindow) -> Bool {
+        NSApp.isActive && window.isVisible && (window.isKeyWindow || window == NSApp.keyWindow || window == NSApp.mainWindow)
     }
 }
