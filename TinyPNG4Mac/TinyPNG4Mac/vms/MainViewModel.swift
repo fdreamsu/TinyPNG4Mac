@@ -247,7 +247,6 @@ class MainViewModel: ObservableObject, TPClientCallback {
                 if !outputFolderUrl.fileExists() {
                     do {
                         try outputFolderUrl.ensureDirectoryExists()
-                        return true
                     } catch {
                         DispatchQueue.main.async {
                             self.settingsNotReadyMessage = String(localized: "Failed to create output directory: \(outputFolderUrl.rawPath()), please re-select the output directory.")
@@ -268,6 +267,13 @@ class MainViewModel: ObservableObject, TPClientCallback {
                 }
                 return false
             }
+        }
+
+        if let proxyValidationError = config.proxyValidationError() {
+            DispatchQueue.main.async {
+                self.settingsNotReadyMessage = proxyValidationError
+            }
+            return false
         }
 
         return true
